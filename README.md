@@ -161,6 +161,29 @@ Das Schema erzwingt noch **nicht alle** fachlichen Regeln:
 Der vorhandene Trigger prüft **neue oder geänderte Bewertungspunkte**;
 er löst diese weiteren Regeln noch nicht.
 
+Aktueller Stand des Bewertungsmodells
+Eine Bewertung bezieht sich auf genau einen Gegenstand:
+ein Dokument, eine Engagement-Angabe, einen Lebensumstand oder eine
+Auszeichnung. Ein Kommissionsmitglied bewertet diesen Gegenstand;
+verschiedene Gegenstände derselben Bewerbung können von verschiedenen
+Mitgliedern bewertet werden.
+
+Jeder Gegenstand darf höchstens einmal bewertet werden. Die Punkte werden
+pro Bewertung und Kriterium in bewertungspunkt gespeichert.
+
+Die Datei sql/04_bewertung_pro_gegenstand.sql hat das ursprüngliche
+Bewertungsschema geändert und die drei vorhandenen Demobewertungen ihren
+Engagement-Angaben zugeordnet.
+
+Wichtig beim Neuaufbau: Diese Migration erwartet genau die drei
+Demobewertungen aus 02_beispieldaten.sql und
+02_beispieldaten_erweitern.sql. Sie muss daher nach beiden
+Beispieldaten-Dateien ausgeführt werden. Sie darf nicht erneut auf der
+bereits migrierten Datenbank laufen.
+
+Der angepasste test_punkte_regel.sql und test_engagement_einmal.sql
+wurden erfolgreich ausgeführt. Beide Tests nehmen ihre Testdaten mit
+ROLLBACK zurück.
 ## Nächste Schritte
 
 1. SQL-Dateien gemeinsam prüfen und Einrichtung auf dem zweiten Rechner testen.
