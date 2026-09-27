@@ -16,4 +16,5 @@ CREATE TABLE bewerbung (
     eingangsdatum DATE,
     status VARCHAR(30) NOT NULL DEFAULT 'Entwurf',
     UNIQUE (studierenden_id, zeitraum_id)
-);
+);psql -h localhost -U stipendium_user -d stipendium_db -W \
+  -v ON_ERROR_STOP=1 -1 -f sql/01_schema_04_bewerbungen.sql

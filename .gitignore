@@ -1,1 +1,26 @@
-/DBS-Venv
+#Lokale Python-Umgebungen
+DBS-Venv/
+.venv/
+venv/
+
+#Python-Zwischendateien
+pycache/
+.py[cod]
+.pytest_cache/
+
+#Lokale Zugangsdaten und Einstellungen
+.env
+.env.
+!.env.example
+*.pem
+*.key
+
+#Lokale Editor- und Betriebssystemdateien
+.vscode/
+.idea/
+.DS_Store
+
+#Lokale Datenbank-Backups
+*.dump
+*.backup
+*.sql.gz
