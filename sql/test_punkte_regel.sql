@@ -15,6 +15,7 @@ DECLARE
     v_abgelehnt BOOLEAN := FALSE;
     v_fremdes_kriterium INTEGER;
     v_fremdes_abgelehnt BOOLEAN := FALSE;
+    v_engagement INTEGER;
 BEGIN
     -- Nur die Datensätze anlegen, die eine Bewertung benötigt.
     INSERT INTO fakultaet (name) VALUES ('Testfakultaet')
@@ -50,8 +51,14 @@ BEGIN
     VALUES (v_student, v_zeitraum)
     RETURNING bewerbungs_nr INTO v_bewerbung;
 
-    INSERT INTO bewertung (bewerbungs_nr, mitglied_id)
-    VALUES (v_bewerbung, v_mitglied)
+        -- Schritt 2: Gegenstand anlegen, der bewertet werden soll
+    INSERT INTO engagement (bewerbungs_nr, art, beschreibung)
+    VALUES (v_bewerbung, 'Ehrenamt', 'Testgegenstand für die Punkteprüfung')
+    RETURNING engagement_id INTO v_engagement;
+
+    -- Schritt 3: Bewertung diesem Engagement zuordnen
+    INSERT INTO bewertung (bewerbungs_nr, mitglied_id, engagement_id)
+    VALUES (v_bewerbung, v_mitglied, v_engagement)
     RETURNING bewertung_id INTO v_bewertung;
 
     INSERT INTO bewertungskriterium (name, max_punkte)
