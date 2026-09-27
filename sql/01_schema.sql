@@ -1,0 +1,16 @@
+CREATE TABLE person (
+    personen_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    vorname VARCHAR(100) NOT NULL,
+    nachname VARCHAR(100) NOT NULL
+);
+
+CREATE TABLE fakultaet (
+    fakultaet_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name VARCHAR(200) NOT NULL
+);
+
+CREATE TABLE studiengang (
+    studiengang_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name VARCHAR(200) NOT NULL,
+    fakultaet_id INTEGER NOT NULL REFERENCES fakultaet(fakultaet_id)
+);
