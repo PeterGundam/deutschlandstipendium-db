@@ -94,7 +94,10 @@ def password_ok(password, stored):
 SQL_LOGIN = """
 SELECT l.personen_id, l.passwort_hash, p.vorname, p.nachname,
        (s.personen_id IS NOT NULL) AS ist_bewerber,
-       (k.personen_id IS NOT NULL) AS ist_kommission
+       (k.personen_id IS NOT NULL AND k.rolle <> 'Koordination')
+           AS ist_kommission,
+       (k.personen_id IS NOT NULL AND k.rolle = 'Koordination')
+           AS ist_koordination
 FROM login_konto l
 JOIN person p ON p.personen_id = l.personen_id
 LEFT JOIN studierender s ON s.personen_id = l.personen_id
@@ -105,25 +108,34 @@ WHERE lower(l.email) = lower(%s)
 
 
 def rolle_aktuell(personen_id):
-    """Rolle und Kontostatus bei jedem App-Durchlauf erneut prüfen."""
+    """Kontostatus und genau eine Rolle bei jedem App-Durchlauf prüfen."""
     rows = query(
         """
         SELECT l.aktiv,
                (s.personen_id IS NOT NULL) AS bewerber,
-               (k.personen_id IS NOT NULL) AS kommission
+               (k.personen_id IS NOT NULL
+                    AND k.rolle <> 'Koordination') AS kommission,
+               (k.personen_id IS NOT NULL
+                    AND k.rolle = 'Koordination') AS koordination
         FROM login_konto l
-        LEFT JOIN studierender s ON s.personen_id = l.personen_id
-        LEFT JOIN kommissionsmitglied k ON k.personen_id = l.personen_id
+        LEFT JOIN studierender s
+          ON s.personen_id = l.personen_id
+        LEFT JOIN kommissionsmitglied k
+          ON k.personen_id = l.personen_id
         WHERE l.personen_id = %s
         """,
         (personen_id,),
     )
+
     if len(rows) != 1 or not rows[0]["aktiv"]:
         return None
-    if rows[0]["bewerber"] == rows[0]["kommission"]:
-        return None
-    return "bewerber" if rows[0]["bewerber"] else "kommission"
 
+    rollen = [
+        name
+        for name in ("bewerber", "kommission", "koordination")
+        if rows[0][name]
+    ]
+    return rollen[0] if len(rollen) == 1 else None
 
 def status_tabelle(rows, leertext):
     if rows:
@@ -155,9 +167,26 @@ def anmelden():
         st.error("E-Mail-Adresse oder Passwort ist falsch.")
         return
 
-    if account["ist_bewerber"] == account["ist_kommission"]:
-        st.error("Dieses Konto hat keine eindeutige Rolle.")
-        return
+    rollen = [
+            rolle
+            for rolle, aktiv in (
+                ("bewerber", account["ist_bewerber"]),
+                ("kommission", account["ist_kommission"]),
+                ("koordination", account["ist_koordination"]),
+            )
+            if aktiv
+        ]
+
+    if len(rollen) != 1:
+            st.error("Dieses Konto hat keine eindeutige Rolle.")
+            return
+
+    st.session_state["user"] = {
+            "id": account["personen_id"],
+            "name": f"{account['vorname']} {account['nachname']}",
+            "role": rollen[0],
+        }
+    st.rerun()
 
     st.session_state["user"] = {
         "id": account["personen_id"],
@@ -1985,7 +2014,523 @@ def commission_detail(application, member_id):
                                 "gespeichert werden."
                             )
     
+SQL_PERIODS = """
+SELECT bz.zeitraum_id, bz.stipendium_id, st.bezeichnung,
+       bz.beginn, bz.ende, bz.max_foerderplaetze,
+       COUNT(DISTINCT b.bewerbungs_nr) AS bewerbungen,
+       COUNT(DISTINCT a.entscheidungs_id) FILTER (
+           WHERE a.foerderstatus = 'Bewilligt'
+       ) AS bewilligt
+FROM bewerbungszeitraum bz
+JOIN stipendium st ON st.stipendium_id = bz.stipendium_id
+LEFT JOIN bewerbung b ON b.zeitraum_id = bz.zeitraum_id
+LEFT JOIN auswahlentscheidung a
+  ON a.bewerbungs_nr = b.bewerbungs_nr
+GROUP BY bz.zeitraum_id, bz.stipendium_id, st.bezeichnung,
+         bz.beginn, bz.ende, bz.max_foerderplaetze
+ORDER BY bz.beginn DESC, bz.zeitraum_id DESC
+"""
 
+SQL_KONTEN_KOORDINATION = """
+SELECT l.personen_id, p.vorname, p.nachname, l.email, l.aktiv,
+       CASE
+           WHEN k.rolle = 'Koordination' THEN 'Koordination'
+           WHEN k.personen_id IS NOT NULL THEN 'Kommission'
+           WHEN s.personen_id IS NOT NULL THEN 'Bewerber'
+           ELSE 'Keine eindeutige Rolle'
+       END AS konto_rolle
+FROM login_konto l
+JOIN person p ON p.personen_id = l.personen_id
+LEFT JOIN studierender s ON s.personen_id = l.personen_id
+LEFT JOIN kommissionsmitglied k ON k.personen_id = l.personen_id
+ORDER BY p.nachname, p.vorname, l.personen_id
+"""
+
+
+def koordinatorrolle_pruefen(cur, personen_id):
+    """Berechtigung bei jeder schreibenden Operation neu prüfen."""
+    cur.execute(
+        """
+        SELECT 1
+        FROM login_konto l
+        JOIN kommissionsmitglied k
+          ON k.personen_id = l.personen_id
+        WHERE l.personen_id = %s
+          AND l.aktiv = TRUE
+          AND k.rolle = 'Koordination'
+        """,
+        (personen_id,),
+    )
+    if cur.fetchone() is None:
+        raise ValueError(
+            "Dieses Konto darf keine Verwaltungsänderungen durchführen."
+        )
+
+
+def stipendium_anlegen(koordinator_id, bezeichnung, betrag):
+    bezeichnung = bezeichnung.strip()
+
+    if not bezeichnung or len(bezeichnung) > 200:
+        raise ValueError(
+            "Bitte eine Bezeichnung mit höchstens 200 Zeichen eingeben."
+        )
+    if betrag <= 0:
+        raise ValueError("Der Förderbetrag muss positiv sein.")
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            koordinatorrolle_pruefen(cur, koordinator_id)
+            cur.execute(
+                """
+                INSERT INTO stipendium (bezeichnung, foerderbetrag)
+                VALUES (%s, %s)
+                RETURNING stipendium_id
+                """,
+                (bezeichnung, betrag),
+            )
+            return cur.fetchone()[0]
+
+
+def zeitraum_anlegen(
+    koordinator_id, stipendium_id, beginn, ende, plaetze
+):
+    from datetime import date
+
+    if beginn >= ende:
+        raise ValueError("Der Beginn muss vor dem Ende liegen.")
+    if ende < date.today():
+        raise ValueError(
+            "Ein neuer Zeitraum darf nicht bereits abgelaufen sein."
+        )
+    if plaetze < 1:
+        raise ValueError("Es muss mindestens einen Förderplatz geben.")
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            koordinatorrolle_pruefen(cur, koordinator_id)
+            cur.execute(
+                """
+                INSERT INTO bewerbungszeitraum
+                    (stipendium_id, beginn, ende, max_foerderplaetze)
+                VALUES (%s, %s, %s, %s)
+                RETURNING zeitraum_id
+                """,
+                (stipendium_id, beginn, ende, plaetze),
+            )
+            return cur.fetchone()[0]
+
+
+def kommissionskonto_anlegen(
+    koordinator_id,
+    vorname,
+    nachname,
+    email,
+    passwort,
+):
+    """
+    Erstellt eine Person, ein Kommissionsmitglied und ein Login-Konto
+    gemeinsam in einer Transaktion. Keine Koordinationsrolle per UI.
+    """
+    vorname = vorname.strip()
+    nachname = nachname.strip()
+    email = email.strip().lower()
+
+    if (
+        not vorname or not nachname
+        or len(vorname) > 100 or len(nachname) > 100
+    ):
+        raise ValueError("Bitte gültige Vor- und Nachnamen eingeben.")
+
+    if not email or "@" not in email or len(email) > 255:
+        raise ValueError("Bitte eine gültige E-Mail-Adresse eingeben.")
+
+    if len(passwort) < 12:
+        raise ValueError(
+            "Das Passwort muss mindestens 12 Zeichen enthalten."
+        )
+
+    # Die bestehende Funktion aus main.py speichert einen
+    # gesalzenen scrypt-Hash, nicht das Klartextpasswort.
+    hashwert = password_hash(passwort)
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            koordinatorrolle_pruefen(cur, koordinator_id)
+
+            cur.execute(
+                """
+                SELECT 1
+                FROM login_konto
+                WHERE lower(email) = %s
+                """,
+                (email,),
+            )
+            if cur.fetchone():
+                raise ValueError(
+                    "Für diese E-Mail-Adresse existiert bereits ein Konto."
+                )
+
+            cur.execute(
+                """
+                INSERT INTO person (vorname, nachname)
+                VALUES (%s, %s)
+                RETURNING personen_id
+                """,
+                (vorname, nachname),
+            )
+            neue_personen_id = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                INSERT INTO kommissionsmitglied (personen_id, rolle)
+                VALUES (%s, 'Gutachter')
+                """,
+                (neue_personen_id,),
+            )
+
+            cur.execute(
+                """
+                INSERT INTO login_konto
+                    (personen_id, email, passwort_hash)
+                VALUES (%s, %s, %s)
+                """,
+                (neue_personen_id, email, hashwert),
+            )
+
+            return neue_personen_id
+
+
+def konto_aktivitaet_aendern(
+    koordinator_id,
+    ziel_personen_id,
+    soll_aktiv_sein,
+):
+    """Konto deaktivieren/reaktivieren; fachliche Datensätze bleiben."""
+    if koordinator_id == ziel_personen_id:
+        raise ValueError(
+            "Du kannst dein eigenes Koordinationskonto "
+            "hier nicht deaktivieren oder ändern."
+        )
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            koordinatorrolle_pruefen(cur, koordinator_id)
+
+            cur.execute(
+                """
+                SELECT l.aktiv, k.rolle
+                FROM login_konto l
+                LEFT JOIN kommissionsmitglied k
+                  ON k.personen_id = l.personen_id
+                WHERE l.personen_id = %s
+                FOR UPDATE OF l
+                """,
+                (ziel_personen_id,),
+            )
+            ziel = cur.fetchone()
+
+            if ziel is None:
+                raise ValueError("Dieses Login-Konto existiert nicht.")
+
+            # Verwaltung anderer Admin-Konten benötigt später einen
+            # eigenen, strengeren Ablauf.
+            if ziel[1] == "Koordination":
+                raise ValueError(
+                    "Koordinationskonten können hier nicht "
+                    "deaktiviert oder reaktiviert werden."
+                )
+
+            cur.execute(
+                """
+                UPDATE login_konto
+                SET aktiv = %s
+                WHERE personen_id = %s
+                """,
+                (soll_aktiv_sein, ziel_personen_id),
+            )
+
+
+def koordinator_dashboard(koordinator_id):
+    st.title("Koordination")
+    st.caption(
+        "Stipendien, Bewerbungszeiträume und Zugänge verwalten. "
+        "Bewerberkonten werden nicht gelöscht, sondern bei Bedarf "
+        "deaktiviert."
+    )
+
+    bereich = st.sidebar.radio(
+        "Koordination",
+        [
+            "Zeiträume & Kapazitäten",
+            "Stipendium anlegen",
+            "Bewerbungszeitraum anlegen",
+            "Kommissionsmitglied anlegen",
+            "Konten verwalten",
+        ],
+        key="koordination_bereich",
+    )
+
+    if bereich == "Zeiträume & Kapazitäten":
+        zeitraeume = query(SQL_PERIODS)
+
+        if not zeitraeume:
+            st.info("Noch keine Bewerbungszeiträume vorhanden.")
+            return
+
+        for zeitraum in zeitraeume:
+            frei = (
+                zeitraum["max_foerderplaetze"]
+                - zeitraum["bewilligt"]
+            )
+
+            with st.container(border=True):
+                st.subheader(
+                    f"{zeitraum['bezeichnung']} "
+                    f"· Zeitraum {zeitraum['zeitraum_id']}"
+                )
+                st.write(
+                    f"**Bewerbungsfrist:** {zeitraum['beginn']} "
+                    f"bis einschließlich {zeitraum['ende']}"
+                )
+
+                a, b, c = st.columns(3)
+                a.metric("Bewerbungen", zeitraum["bewerbungen"])
+                b.metric(
+                    "Bewilligt / maximal",
+                    f"{zeitraum['bewilligt']} / "
+                    f"{zeitraum['max_foerderplaetze']}",
+                )
+                c.metric("Noch verfügbar", frei)
+
+                st.caption(
+                    "Verfügbar bezeichnet eine Obergrenze, "
+                    "keine Pflicht, alle Plätze zu vergeben."
+                )
+
+    elif bereich == "Stipendium anlegen":
+        st.subheader("Neues Stipendium")
+
+        with st.form("neues_stipendium"):
+            name = st.text_input("Bezeichnung *")
+            betrag = st.number_input(
+                "Förderbetrag in EUR",
+                min_value=0.01,
+                value=300.00,
+                step=10.00,
+            )
+            speichern = st.form_submit_button(
+                "Stipendium anlegen",
+                type="primary",
+            )
+
+        if speichern:
+            try:
+                neue_id = stipendium_anlegen(
+                    koordinator_id, name, betrag
+                )
+                st.success(
+                    f"Stipendium mit ID {neue_id} angelegt."
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+            except psycopg.Error:
+                st.error("Stipendium konnte nicht angelegt werden.")
+
+    elif bereich == "Bewerbungszeitraum anlegen":
+        stipendien = query(
+            """
+            SELECT stipendium_id, bezeichnung
+            FROM stipendium
+            ORDER BY bezeichnung, stipendium_id
+            """
+        )
+
+        if not stipendien:
+            st.info("Lege zuerst ein Stipendium an.")
+            return
+
+        st.subheader("Neuer Bewerbungszeitraum")
+        st.info(
+            "Das Fristende ist der letzte Bewerbungstag. "
+            "Entscheidungen sind erst am Folgetag erlaubt."
+        )
+
+        with st.form("neuer_zeitraum"):
+            stipendium = st.selectbox(
+                "Stipendium *",
+                stipendien,
+                format_func=lambda s: (
+                    f"{s['bezeichnung']} "
+                    f"(ID {s['stipendium_id']})"
+                ),
+            )
+            beginn = st.date_input("Beginn *")
+            ende = st.date_input("Letzter Bewerbungstag *")
+            plaetze = st.number_input(
+                "Maximale Förderplätze *",
+                min_value=1,
+                value=25,
+                step=1,
+            )
+            speichern = st.form_submit_button(
+                "Bewerbungszeitraum anlegen",
+                type="primary",
+            )
+
+        if speichern:
+            try:
+                neue_id = zeitraum_anlegen(
+                    koordinator_id,
+                    stipendium["stipendium_id"],
+                    beginn,
+                    ende,
+                    int(plaetze),
+                )
+                st.success(
+                    f"Bewerbungszeitraum {neue_id} angelegt."
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+            except psycopg.Error:
+                st.error(
+                    "Bewerbungszeitraum konnte nicht angelegt werden."
+                )
+
+    elif bereich == "Kommissionsmitglied anlegen":
+        st.subheader("Neues Kommissionskonto")
+        st.info(
+            "Dieses Konto darf Bewerbungen prüfen. "
+            "Eine Koordinationsrolle kann hier nicht vergeben werden."
+        )
+
+        with st.form("neues_kommissionskonto"):
+            vorname = st.text_input("Vorname *")
+            nachname = st.text_input("Nachname *")
+            email = st.text_input("Login-E-Mail *")
+            passwort = st.text_input(
+                "Startpasswort (mindestens 12 Zeichen) *",
+                type="password",
+            )
+            wiederholung = st.text_input(
+                "Passwort wiederholen *",
+                type="password",
+            )
+            speichern = st.form_submit_button(
+                "Kommissionskonto anlegen",
+                type="primary",
+            )
+
+        if speichern:
+            if passwort != wiederholung:
+                st.error("Die Passwörter stimmen nicht überein.")
+            else:
+                try:
+                    neue_id = kommissionskonto_anlegen(
+                        koordinator_id,
+                        vorname,
+                        nachname,
+                        email,
+                        passwort,
+                    )
+                    st.success(
+                        f"Kommissionskonto für Personen-ID "
+                        f"{neue_id} angelegt."
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                except psycopg.errors.UniqueViolation:
+                    st.error(
+                        "Diese E-Mail-Adresse wird bereits verwendet."
+                    )
+                except psycopg.Error:
+                    st.error(
+                        "Das Kommissionskonto konnte nicht "
+                        "angelegt werden."
+                    )
+
+    else:
+        st.subheader("Konten verwalten")
+        st.warning(
+            "„Deaktivieren“ sperrt den Login. Bewerbungen, "
+            "Bewertungen und Entscheidungen bleiben erhalten. "
+            "Konten werden hier nicht endgültig gelöscht."
+        )
+
+        konten = query(SQL_KONTEN_KOORDINATION)
+
+        status_tabelle(
+            [
+                {
+                    "Personen-ID": k["personen_id"],
+                    "Name": f"{k['vorname']} {k['nachname']}",
+                    "E-Mail": k["email"],
+                    "Rolle": k["konto_rolle"],
+                    "Status": (
+                        "Aktiv" if k["aktiv"] else "Deaktiviert"
+                    ),
+                }
+                for k in konten
+            ],
+            "Noch keine Konten vorhanden.",
+        )
+
+        bearbeitbar = [
+            k for k in konten
+            if k["konto_rolle"] != "Koordination"
+        ]
+
+        if not bearbeitbar:
+            return
+
+        ziel = st.selectbox(
+            "Konto auswählen",
+            bearbeitbar,
+            format_func=lambda k: (
+                f"{k['vorname']} {k['nachname']} "
+                f"· {k['konto_rolle']} "
+                f"· {'Aktiv' if k['aktiv'] else 'Deaktiviert'} "
+                f"(ID {k['personen_id']})"
+            ),
+        )
+
+        aktion = (
+            "Deaktivieren" if ziel["aktiv"]
+            else "Wieder aktivieren"
+        )
+
+        with st.form("konto_status_aendern"):
+            st.write(
+                f"**Ausgewählt:** {ziel['vorname']} "
+                f"{ziel['nachname']} — {ziel['email']}"
+            )
+            bestaetigt = st.checkbox(
+                f"Ich möchte dieses Konto "
+                f"{aktion.lower()}."
+            )
+            speichern = st.form_submit_button(
+                f"Konto {aktion.lower()}",
+                type="primary",
+            )
+
+        if speichern:
+            if not bestaetigt:
+                st.warning("Bitte die Aktion zuerst bestätigen.")
+            else:
+                try:
+                    konto_aktivitaet_aendern(
+                        koordinator_id,
+                        ziel["personen_id"],
+                        not ziel["aktiv"],
+                    )
+                    st.success(f"Konto {aktion.lower()}: erfolgreich.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+                except psycopg.Error:
+                    st.error(
+                        "Der Kontostatus konnte nicht "
+                        "geändert werden."
+                    )
 
 def commission_dashboard(member_id):
     st.sidebar.radio(
@@ -1997,26 +2542,74 @@ def commission_dashboard(member_id):
         ),
     )
 
+    zeitraeume = query(SQL_PERIODS)
+    if not zeitraeume:
+        st.title("Kommissions-Dashboard")
+        st.info("Noch kein Bewerbungszeitraum eingerichtet.")
+        return
+
+    ausgewaehlter_zeitraum = st.sidebar.selectbox(
+        "Bewerbungszeitraum",
+        zeitraeume,
+        format_func=lambda z: (
+            f"{z['bezeichnung']} · "
+            f"{z['beginn']}–{z['ende']} "
+            f"(ID {z['zeitraum_id']})"
+        ),
+        key="commission_period",
+        on_change=lambda: st.session_state.pop(
+            "commission_detail", None
+        ),
+    )
+    zeitraum_id = ausgewaehlter_zeitraum["zeitraum_id"]
+
+    st.title(
+        f"{ausgewaehlter_zeitraum['bezeichnung']} "
+        f"· Zeitraum {zeitraum_id}"
+    )
+    st.caption(
+        f"Bewerbungsfrist: {ausgewaehlter_zeitraum['beginn']} "
+        f"bis {ausgewaehlter_zeitraum['ende']} · "
+        f"Entscheidungen ab dem Folgetag"
+    )
+
+    a, b, c = st.columns(3)
+    a.metric("Bewerbungen", ausgewaehlter_zeitraum["bewerbungen"])
+    b.metric(
+        "Bewilligt / maximal",
+        (
+            f"{ausgewaehlter_zeitraum['bewilligt']} / "
+            f"{ausgewaehlter_zeitraum['max_foerderplaetze']}"
+        ),
+    )
+    c.metric(
+        "Noch verfügbar",
+        ausgewaehlter_zeitraum["max_foerderplaetze"]
+        - ausgewaehlter_zeitraum["bewilligt"],
+    )
+
     menu = st.session_state["commission_menu"]
 
     if menu == "Rangliste":
-        st.title("Interne Rangliste")
+        st.subheader("Interne Rangliste dieses Zeitraums")
         status_tabelle(
             query(
                 """
-                SELECT zeitraum_id, position, bewerbungs_nr,
-                       matrikel_nr, vorname, nachname,
-                       gesamt_score
+                SELECT position, bewerbungs_nr, matrikel_nr,
+                       vorname, nachname, gesamt_score
                 FROM rangliste
-                ORDER BY zeitraum_id, position, bewerbungs_nr
-                """
+                WHERE zeitraum_id = %s
+                ORDER BY position, bewerbungs_nr
+                """,
+                (zeitraum_id,),
             ),
-            "Noch keine abgeschlossenen Bewerbungen.",
+            "Noch keine abgeschlossenen Bewerbungen "
+            "in diesem Zeitraum.",
         )
         return
 
     if menu == "Entscheidungen":
-        st.title("Auswahlentscheidungen")
+        st.subheader("Entscheidungen dieses Zeitraums")
         status_tabelle(
             query(
                 """
@@ -2028,37 +2621,41 @@ def commission_dashboard(member_id):
                   ON b.bewerbungs_nr = a.bewerbungs_nr
                 JOIN studierender s
                   ON s.personen_id = b.studierenden_id
+                WHERE b.zeitraum_id = %s
                 ORDER BY a.entscheidungsdatum DESC,
                          a.entscheidungs_id DESC
-                """
+                """,
+                (zeitraum_id,),
             ),
-            "Noch keine Entscheidungen vorhanden.",
+            "Noch keine Entscheidungen in diesem Zeitraum.",
         )
         return
 
-    applications = query(SQL_COMMISSION_APPLICATIONS)
-    detail_id = st.session_state.get("commission_detail")
+    applications = [
+        application
+        for application in query(SQL_COMMISSION_APPLICATIONS)
+        if application["zeitraum_id"] == zeitraum_id
+    ]
 
+    detail_id = st.session_state.get("commission_detail")
     if detail_id is not None:
         application = next(
             (
-                a for a in applications
-                if a["bewerbungs_nr"] == detail_id
+                application
+                for application in applications
+                if application["bewerbungs_nr"] == detail_id
             ),
             None,
         )
         if application is None:
             st.session_state.pop("commission_detail", None)
-            st.warning("Bewerbung nicht verfügbar.")
+            st.warning(
+                "Diese Bewerbung gehört nicht zum ausgewählten Zeitraum."
+            )
         else:
             commission_detail(application, member_id)
         return
 
-    st.title("Kommissions-Dashboard")
-    st.caption(
-        "Nur eingereichte oder später bearbeitete Bewerbungen "
-        "werden angezeigt; Entwürfe sind privat."
-    )
     commission_list(applications)
 
 
@@ -2095,10 +2692,15 @@ try:
         st.session_state.clear()
         st.rerun()
 
+ 
     if current_role == "bewerber":
         applicant_dashboard(user["id"])
-    else:
+    elif current_role == "kommission":
         commission_dashboard(user["id"])
+    elif current_role == "koordination":
+        koordinator_dashboard(user["id"])
+    else:
+        st.error("Unbekannte Rolle.")
 
 except (psycopg.Error, RuntimeError):
     st.error(
