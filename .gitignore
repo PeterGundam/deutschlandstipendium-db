@@ -24,3 +24,6 @@ pycache/
 *.dump
 *.backup
 *.sql.gz
+
+#Hochgeladene Bewerbungsunterlagen – niemals ins Repository
+private_uploads/
