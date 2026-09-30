@@ -158,6 +158,7 @@ def initialisieren():
         "filter_status": "Alle",
         "filter_bewertung": "Offene Bewertungsaufgaben",
         "sortierung": "Name A–Z",
+        "filter_entscheidung": "Alle",
         "demo_bewertungen": {
             "a-engagement": {
                 "punkte": 8,
@@ -517,6 +518,7 @@ def bewerbungen_filtern():
     suchtext = st.session_state.suche_bewerbung.strip().casefold()
     status_filter = st.session_state.filter_status
     bewertungs_filter = st.session_state.filter_bewertung
+    entscheidungs_filter = st.session_state.filter_entscheidung
 
     treffer = []
 
@@ -531,18 +533,28 @@ def bewerbungen_filtern():
         if status_filter != "Alle" and daten["status"] != status_filter:
             continue
 
-        stand = bewertungslabel(kennung)
+        bewertungsstand = bewertungslabel(kennung)
 
         if (
             bewertungs_filter == "Offene Bewertungsaufgaben"
-            and stand == "Geprüft"
+            and bewertungsstand == "Geprüft"
         ):
             continue
 
         if (
-            bewertungs_filter
-            in ("Offen", "Teilweise bewertet", "Geprüft")
-            and stand != bewertungs_filter
+            bewertungs_filter in ("Offen", "Teilweise bewertet", "Geprüft")
+            and bewertungsstand != bewertungs_filter
+        ):
+            continue
+
+        entscheidung = st.session_state.demo_entscheidungen.get(kennung)
+        entscheidungsstand = (
+            entscheidung["status"] if entscheidung else "Noch offen"
+        )
+
+        if (
+            entscheidungs_filter != "Alle"
+            and entscheidungsstand != entscheidungs_filter
         ):
             continue
 
@@ -558,13 +570,16 @@ def bewerbungen_filtern():
 
     if sortierung == "Name A–Z":
         treffer.sort(key=lambda k: BEWERBUNGEN[k]["name"].casefold())
+
     elif sortierung == "Name Z–A":
         treffer.sort(
             key=lambda k: BEWERBUNGEN[k]["name"].casefold(),
             reverse=True,
         )
+
     elif sortierung == "Matrikelnummer":
         treffer.sort(key=lambda k: BEWERBUNGEN[k]["matrikel"])
+
     elif sortierung == "Bewerbungsstatus":
         treffer.sort(
             key=lambda k: (
@@ -572,6 +587,7 @@ def bewerbungen_filtern():
                 BEWERBUNGEN[k]["name"].casefold(),
             )
         )
+
     elif sortierung == "Bearbeitungsfortschritt":
         treffer.sort(
             key=lambda k: (
@@ -587,8 +603,8 @@ def bewerbungen_filtern():
 def suchseite():
     st.subheader("Bewerbungen finden")
     st.caption(
-        "Auch geprüfte Bewerbungen bleiben unter „Alle“ "
-        "oder „Geprüft“ erreichbar."
+        "Geprüfte und entschiedene Bewerbungen bleiben über die Filter "
+        "„Alle“ oder ihren jeweiligen Status auffindbar."
     )
 
     st.text_input(
@@ -597,14 +613,18 @@ def suchseite():
         key="suche_bewerbung",
     )
 
-    a, b, c = st.columns(3)
-    with a:
+    spalte_status, spalte_bewertung, spalte_entscheidung, spalte_sortierung = (
+        st.columns(4)
+    )
+
+    with spalte_status:
         st.selectbox(
             "Bewerbungsstatus",
             ["Alle", "Eingereicht", "In_Pruefung", "Abgeschlossen"],
             key="filter_status",
         )
-    with b:
+
+    with spalte_bewertung:
         st.selectbox(
             "Bewertungsstand",
             [
@@ -616,7 +636,15 @@ def suchseite():
             ],
             key="filter_bewertung",
         )
-    with c:
+
+    with spalte_entscheidung:
+        st.selectbox(
+            "Entscheidung",
+            ["Alle", "Noch offen", "Bewilligt", "Warteliste", "Abgelehnt"],
+            key="filter_entscheidung",
+        )
+
+    with spalte_sortierung:
         st.selectbox(
             "Sortieren nach",
             [
@@ -634,13 +662,18 @@ def suchseite():
 
     if not treffer:
         st.info(
-            "Keine passenden Bewerbungen. Versuche andere "
-            "Such- oder Filtereinstellungen."
+            "Keine passenden Bewerbungen. Prüfe insbesondere, ob der "
+            "Bewertungsfilter „Offene Bewertungsaufgaben“ eine bereits "
+            "geprüfte Bewerbung ausblendet."
         )
         return
 
     for kennung in treffer:
         daten = BEWERBUNGEN[kennung]
+        entscheidung = st.session_state.demo_entscheidungen.get(kennung)
+        entscheidungsstand = (
+            entscheidung["status"] if entscheidung else "Noch offen"
+        )
 
         with st.container(border=True):
             info, aktion = st.columns([4, 1])
@@ -653,6 +686,7 @@ def suchseite():
                     f"**Bewerbungsstatus:** {daten['status']}"
                     f"**Bewertungsstand:** {bewertungslabel(kennung)}"
                 )
+                st.write(f"**Entscheidung:** {entscheidungsstand}")
                 fortschritt_anzeigen(kennung)
 
             with aktion:
@@ -932,6 +966,7 @@ def kommissions_dashboard():
         "Navigation",
         KOMMISSION_SEITEN,
         key="kommission_seite",
+        on_change=zur_trefferliste,
     )
     st.sidebar.button(
         "Zur Startseite",
