@@ -48,11 +48,7 @@ Das Projekt bearbeitet die folgenden Bestandteile der Aufgabenstellung:
 | SQL-Anfragen | Zehn dokumentierte Abfragen mit Join, Aggregation, Unterabfrage und Parametrisierung |
 | Tool | Rollenabhängige Streamlit-Anwendung mit PostgreSQL-Verbindung |
 
-Das ER-Diagramm liegt unter
-[`pictures/ER_diagramm.png`](pictures/ER_diagramm.png).
 
-> Der relative Pfad ist absichtlich gewählt: Er funktioniert auch nach dem
-> Klonen des Repositorys, sofern die Bilddatei mit versioniert wird.
 
 ## 2. Benutzerrollen und Use Cases
 
@@ -235,6 +231,105 @@ unterhalb des Maximums liegen oder ein Kriterium zum Zeitraum gehört,
 betrifft mehrere Tabellen und wird zusätzlich geprüft.
 
 ## 5. Datendefinition, View und Indizes
+
+## Entitäten und Datenbanktabellen
+
+Ein **Entitätstyp** beschreibt einen Gegenstand der Fachwelt, beispielsweise
+eine Bewerbung. Bei der Umsetzung entsteht daraus in der Regel eine Tabelle.
+Zusätzliche Tabellen bilden Beziehungen ab, insbesondere m:n-Beziehungen.
+Daher ist die Anzahl der Tabellen nicht identisch mit der Anzahl der
+Entitätstypen im ER-Diagramm.
+
+**PK** = Primärschlüssel, **FK** = Fremdschlüssel,
+**UNIQUE** = Wert oder Kombination darf nur einmal vorkommen.
+
+### Personen und Hochschule
+
+| Entität / Tabelle | Wichtige Spalten | Bedeutung und Beziehungen |
+|---|---|---|
+| `person` | `personen_id` (PK), `vorname`, `nachname` | Gemeinsame Personendaten. |
+| `studierender` | `personen_id` (PK, FK → `person`), `matrikel_nr` (UNIQUE), `email`, `fachsemester`, `studiengang_id` (FK) | Bewerberprofil einer Person. |
+| `kommissionsmitglied` | `personen_id` (PK, FK → `person`), `rolle` | Bewertet Bewerbungsgegenstände. `Koordination` ist im Projekt eine besondere Rolle innerhalb dieser Tabelle. |
+| `fakultaet` | `fakultaet_id` (PK), `name` | Fakultät der Hochschule. |
+| `studiengang` | `studiengang_id` (PK), `name`, `fakultaet_id` (FK) | Studiengang innerhalb einer Fakultät. |
+| `hochschulaccount` | `account_id` (PK), `benutzername`, `studierenden_id` (FK, UNIQUE) | Ursprünglich modellierter Account eines Studierenden. |
+| `login_konto` | `konto_id` (PK), `personen_id` (FK, UNIQUE), `email` (eindeutig), `passwort_hash`, `aktiv` | Tatsächliches Login für Bewerber und Kommissionsmitglieder. Es wird kein Klartextpasswort gespeichert. |
+
+`hochschulaccount` und `login_konto` haben derzeit unterschiedliche Aufgaben:
+Ersteres stammt aus dem ursprünglichen Fachmodell; Letzteres übernimmt die
+Anmeldung in der Anwendung. Ob beide im endgültigen Modell benötigt werden,
+ist eine bewusste Entwurfsfrage.
+
+### Stipendium und Bewerbung
+
+| Entität / Tabelle | Wichtige Spalten | Bedeutung und Beziehungen |
+|---|---|---|
+| `foerderer` | `foerderer_id` (PK), `name` | Person oder Organisation, die ein Stipendium finanziert. |
+| `stipendium` | `stipendium_id` (PK), `bezeichnung`, `foerderbetrag` | Förderangebot. Der Förderbetrag ist nicht die Zahl verfügbarer Plätze. |
+| `bewerbungszeitraum` | `zeitraum_id` (PK), `stipendium_id` (FK), `beginn`, `ende`, `max_foerderplaetze` | Konkrete Ausschreibung eines Stipendiums mit Frist und maximaler Zahl an Bewilligungen. |
+| `bewerbung` | `bewerbungs_nr` (PK), `studierenden_id` (FK), `zeitraum_id` (FK), `erstellungsdatum`, `eingangsdatum`, `status` | Bewerbung einer Person für genau einen Zeitraum. Die Kombination aus Studierendem und Zeitraum ist eindeutig. |
+
+**Beispiel:** Ein Stipendium kann mehrere Bewerbungszeiträume haben. Ein
+Studierender kann sich in unterschiedlichen Zeiträumen erneut bewerben,
+aber höchstens einmal innerhalb desselben Zeitraums.
+
+### Unterlagen und Angaben
+
+| Entität / Tabelle | Wichtige Spalten | Bedeutung und Beziehungen |
+|---|---|---|
+| `dokument` | `dokument_id` (PK), `bewerbungs_nr` (FK), `dateiname`, `dokumenttyp`, `dateipfad` | Datei einer Bewerbung. Der Dateipfad verweist in der lokalen Demo auf die gespeicherte PDF. |
+| `motivationsschreiben` | `dokument_id` (PK, FK → `dokument`) | Kennzeichnet ein Dokument als Motivationsschreiben. |
+| `leistungsnachweis` | `dokument_id` (PK, FK → `dokument`), `durchschnittsnote` | Kennzeichnet ein Dokument als Leistungsnachweis. |
+| `engagement` | `engagement_id` (PK), `bewerbungs_nr` (FK), `art`, `beschreibung` | Eigenständige Engagement-Angabe; auch ohne PDF möglich. |
+| `lebensumstand` | `umstand_id` (PK), `bewerbungs_nr` (FK), `beschreibung` | Eigenständige Angabe zu einem relevanten Lebensumstand. |
+| `auszeichnung` | `auszeichnung_id` (PK), `bewerbungs_nr` (FK), `titel`, `beschreibung` | Eigenständige Auszeichnungsangabe. |
+
+Eine Angabe und ein Dokument sind **nicht dasselbe**: Das Engagement enthält
+beispielsweise die Beschreibung einer Tätigkeit. Eine PDF kann zusätzlich
+als Nachweis für diese Tätigkeit dienen.
+
+### Bewertung und Entscheidung
+
+| Entität / Tabelle | Wichtige Spalten | Bedeutung und Beziehungen |
+|---|---|---|
+| `bewertungskriterium` | `kriterium_id` (PK), `name`, `max_punkte` | Definiert ein Bewertungskriterium und seine maximale Punktzahl. |
+| `bewertung` | `bewertung_id` (PK), `bewerbungs_nr` (FK), `mitglied_id` (FK), `dokument_id` / `engagement_id` / `umstand_id` / `auszeichnung_id` (optionale FKs), `bewertungsdatum`, `status`, `kommentar` | Bewertung durch ein Mitglied. **Genau eine** der vier Gegenstands-IDs muss gesetzt sein. |
+| `auswahlentscheidung` | `entscheidungs_id` (PK), `bewerbungs_nr` (FK, UNIQUE), `foerderstatus`, `entscheidungsdatum`, `begruendung` | Aktuelle Förderentscheidung zu einer Bewerbung. |
+| `benachrichtigung` | `benachrichtigungs_id` (PK), `bewerbungs_nr` (FK), `datum`, `typ`, `sendestatus` | Vorgemerkte Nachricht, etwa Eingangsbestätigung oder Förderentscheidung. |
+| `audit_log` | `log_id` (PK), `mitglied_id` (FK), `bewertung_id` oder `entscheidungs_id` (FK), `zeitstempel`, `aktion`, `alter_wert`, `neuer_wert` | Protokolliert ausgewählte Änderungen an Bewertungen und Entscheidungen. |
+
+Die Punkte stehen **nicht als einzelne Zahl in `bewertung`**: Eine Bewertung
+kann Punkte für Kriterien enthalten. Diese Zuordnung übernimmt
+`bewertungspunkt`.
+
+### Zusätzliche Tabellen für Beziehungen
+
+Diese Tabellen sind bei der Überführung ins relationale Modell entstanden.
+Sie müssen nicht alle als eigenständige Entitätstypen im ER-Diagramm zählen.
+
+| Beziehungstabelle | Wichtige Spalten | Zweck |
+|---|---|---|
+| `finanzierung` | `foerderer_id` + `stipendium_id` (gemeinsamer PK), `finanzierungsbetrag` | Verbindet Förderer und Stipendien. |
+| `zeitraum_kriterium` | `zeitraum_id` + `kriterium_id` (gemeinsamer PK), `gewichtung` | Legt fest, welche Kriterien in einem Zeitraum gelten und wie sie gewichtet werden. |
+| `bewertungspunkt` | `bewertung_id` + `kriterium_id` (gemeinsamer PK), `punkte` | Speichert die Punkte für ein Kriterium innerhalb einer konkreten Bewertung. |
+| `entscheidungsbeteiligung` | `entscheidungs_id` + `mitglied_id` (gemeinsamer PK) | Hält beteiligte Kommissionsmitglieder einer Entscheidung fest. |
+| `dokumentbeleg` | `dokument_id` (PK), `engagement_id` oder `umstand_id` oder `auszeichnung_id` (FK) | Ordnet eine PDF optional genau einer Bewerbungsangabe als Nachweis zu. |
+
+### Wie hängen die Tabellen zusammen?
+
+Vereinfacht lässt sich ein vollständiger Vorgang so verfolgen:
+
+```text
+person
+  └── studierender
+        └── bewerbung
+              ├── bewerbungszeitraum ── stipendium
+              ├── dokument
+              ├── engagement / lebensumstand / auszeichnung
+              ├── bewertung ── kommissionsmitglied
+              │     └── bewertungspunkt ── bewertungskriterium
+              ├── auswahlentscheidung
+              └── benachrichtigung
 
 Die SQL-Dateien im Ordner `sql/` enthalten die Tabellendefinitionen und
 spätere Schemaänderungen. Primärschlüssel identifizieren Datensätze;
