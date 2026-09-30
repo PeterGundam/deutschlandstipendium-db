@@ -1580,6 +1580,31 @@ def commission_list(applications):
     if not results:
         st.info("Keine Bewerbung passt zu Suche und Filtern.")
 
+def zeitraum_entscheidung_info(zeitraum_id: int) -> dict:
+    """Frist, Kapazität und heutiges Datum direkt aus PostgreSQL lesen."""
+    rows = query(
+        """
+        SELECT
+            bz.ende,
+            bz.ende + 1 AS entscheidungen_ab,
+            CURRENT_DATE AS heute,
+            bz.max_foerderplaetze,
+            (
+                SELECT COUNT(*)
+                FROM bewerbung b
+                JOIN auswahlentscheidung a
+                  ON a.bewerbungs_nr = b.bewerbungs_nr
+                WHERE b.zeitraum_id = bz.zeitraum_id
+                  AND a.foerderstatus = 'Bewilligt'
+            ) AS bereits_bewilligt
+        FROM bewerbungszeitraum bz
+        WHERE bz.zeitraum_id = %s
+        """,
+        (zeitraum_id,),
+    )
+    if len(rows) != 1:
+        raise ValueError("Bewerbungszeitraum nicht gefunden.")
+    return rows[0]
 
 def commission_detail(application, member_id):
     number = application["bewerbungs_nr"]
@@ -1820,63 +1845,146 @@ def commission_detail(application, member_id):
             "Die grüne Leiste zeigt nur, dass alle bislang "
             "erfassten Gegenstände bewertet wurden."
         )
-
     with tab_decision:
+        st.subheader("Förderentscheidung")
+
+        info = zeitraum_entscheidung_info(
+            application["zeitraum_id"]
+        )
+        frist_abgelaufen = info["heute"] > info["ende"]
+        plaetze_frei = (
+            info["max_foerderplaetze"]
+            - info["bereits_bewilligt"]
+        )
+
+        frist_spalte, platz_spalte = st.columns(2)
+        frist_spalte.metric(
+            "Entscheidungen möglich ab",
+            str(info["entscheidungen_ab"]),
+        )
+        platz_spalte.metric(
+            "Bereits bewilligte Plätze",
+            (
+                f"{info['bereits_bewilligt']} / "
+                f"{info['max_foerderplaetze']}"
+            ),
+        )
+
         if application["entscheidung"] != "Noch offen":
             st.success(
-                "Entscheidung: "
-                f"{application['entscheidung']}"
+                "Für diese Bewerbung wurde bereits entschieden: "
+                f"{application['entscheidung']}."
             )
+            st.caption(
+                "Eine bestehende Entscheidung wird hier nicht erneut "
+                "gespeichert. Ältere Demodaten können vor Einführung "
+                "der Fristregel angelegt worden sein."
+            )
+
+        elif not frist_abgelaufen:
+            st.warning(
+                f"Die Bewerbungsfrist läuft bis einschließlich "
+                f"{info['ende']}. Eine Entscheidung ist erst ab "
+                f"{info['entscheidungen_ab']} möglich."
+            )
+
         elif application["status"] not in (
-            "Eingereicht", "In_Pruefung"
+            "Eingereicht",
+            "In_Pruefung",
         ):
             st.info(
-                "Diese Bewerbung ist nicht entscheidungsbereit."
+                "Diese Bewerbung hat keinen Status, in dem eine "
+                "neue Förderentscheidung erfasst werden kann."
             )
+
         else:
             with db() as conn:
                 with conn.cursor() as cur:
-                    ready, message = decision_ready(cur, number)
+                    bereit, meldung = decision_ready(cur, number)
 
-            if ready:
-                st.success(message)
+            if bereit:
+                st.success(meldung)
             else:
-                st.warning(message)
+                st.warning(meldung)
+
+            if plaetze_frei <= 0:
+                st.info(
+                    "Alle Förderplätze sind bereits vergeben. "
+                    "Warteliste und Ablehnung bleiben möglich."
+                )
+                moegliche_ergebnisse = [
+                    "Warteliste",
+                    "Abgelehnt",
+                ]
+            else:
+                st.caption(
+                    f"Noch {plaetze_frei} Förderplatz/-plätze verfügbar."
+                )
+                moegliche_ergebnisse = [
+                    "Bewilligt",
+                    "Warteliste",
+                    "Abgelehnt",
+                ]
 
             with st.form(f"decision_{number}"):
-                result = st.selectbox(
+                ergebnis = st.selectbox(
                     "Förderentscheidung",
-                    ["Bewilligt", "Warteliste", "Abgelehnt"],
+                    moegliche_ergebnisse,
                 )
-                reason = st.text_area("Begründung *")
-                confirm = st.checkbox(
-                    "Ich bestätige die endgültige Entscheidung."
+                begruendung = st.text_area("Begründung *")
+                bestaetigung = st.checkbox(
+                    "Ich bestätige diese endgültige Entscheidung."
                 )
-                save = st.form_submit_button(
+                speichern = st.form_submit_button(
                     "Entscheidung erfassen",
                     type="primary",
-                    disabled=not ready,
+                    disabled=not bereit,
                 )
 
-            if save:
-                if not confirm:
+            if speichern:
+                if not bestaetigung:
                     st.warning(
-                        "Bitte die Entscheidung bestätigen."
+                        "Bitte bestätige zuerst die Entscheidung."
                     )
                 else:
                     try:
                         make_decision(
-                            member_id, number, result, reason
+                            member_id,
+                            number,
+                            ergebnis,
+                            begruendung,
                         )
                         st.success("Entscheidung gespeichert.")
                         st.rerun()
+
                     except ValueError as exc:
                         st.error(str(exc))
-                    except psycopg.Error:
-                        st.error(
-                            "Entscheidung konnte nicht "
-                            "gespeichert werden."
-                        )
+
+                    except psycopg.Error as exc:
+                        # Zwischen Anzeige und Klick könnte ein anderes
+                        # Mitglied den letzten freien Platz vergeben haben.
+                        meldung_db = str(exc)
+
+                        if "Keine freien Förderplätze" in meldung_db:
+                            st.error(
+                                "Inzwischen sind alle Förderplätze "
+                                "vergeben. Bitte aktualisiere die Seite "
+                                "und wähle Warteliste oder Abgelehnt."
+                            )
+                        elif (
+                            "Förderentscheidungen sind erst"
+                            in meldung_db
+                        ):
+                            st.error(
+                                "Die Bewerbungsfrist ist noch nicht "
+                                "abgelaufen."
+                            )
+                        else:
+                            st.error(
+                                "Die Entscheidung konnte nicht "
+                                "gespeichert werden."
+                            )
+    
 
 
 def commission_dashboard(member_id):
