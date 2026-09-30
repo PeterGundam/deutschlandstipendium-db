@@ -48,6 +48,8 @@ Das Projekt bearbeitet die folgenden Bestandteile der Aufgabenstellung:
 | SQL-Anfragen | Zehn dokumentierte Abfragen mit Join, Aggregation, Unterabfrage und Parametrisierung |
 | Tool | Rollenabhängige Streamlit-Anwendung mit PostgreSQL-Verbindung |
 
+[`pictures/ER_diagramm.png`](pictures/ER_diagramm.png).
+
 
 
 ## 2. Benutzerrollen und Use Cases
